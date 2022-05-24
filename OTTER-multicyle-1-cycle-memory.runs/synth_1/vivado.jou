@@ -1,0 +1,13 @@
+#-----------------------------------------------------------
+# Vivado v2021.2 (64-bit)
+# SW Build 3367213 on Tue Oct 19 02:48:09 MDT 2021
+# IP Build 3369179 on Thu Oct 21 08:25:16 MDT 2021
+# Start of session at: Sat May 21 23:21:35 2022
+# Process ID: 23588
+# Current directory: C:/Users/joshu/Desktop/School/CPE333/OTTER-multicyle-1-cycle-memory/OTTER-multicyle-1-cycle-memory.runs/synth_1
+# Command line: vivado.exe -log OTTER_Wrapper.vds -product Vivado -mode batch -messageDb vivado.pb -notrace -source OTTER_Wrapper.tcl
+# Log file: C:/Users/joshu/Desktop/School/CPE333/OTTER-multicyle-1-cycle-memory/OTTER-multicyle-1-cycle-memory.runs/synth_1/OTTER_Wrapper.vds
+# Journal file: C:/Users/joshu/Desktop/School/CPE333/OTTER-multicyle-1-cycle-memory/OTTER-multicyle-1-cycle-memory.runs/synth_1\vivado.jou
+# Running On: LAPTOP-12K94QAC, OS: Windows, CPU Frequency: 2304 MHz, CPU Physical cores: 8, Host memory: 68475 MB
+#-----------------------------------------------------------
+source OTTER_Wrapper.tcl -notrace
