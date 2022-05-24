@@ -203,7 +203,7 @@ module dcache(
             mem.write_addr_valid = 0;
             cpu.read_addr_ready = 0;
             cpu.write_addr = 0;
-            cpu.read_addr_valid = 0;
+            cpu.read_data_valid = 0;
             mem.read_addr = {cpu_tag ,cpu_index}; //question: what is i? should this be {tag_read.tag, tag_req.index or data_req.index?}  A:
             
             tag_write.tag = cpu_tag; //this is input to tag cache. should dupdate on clock edge
