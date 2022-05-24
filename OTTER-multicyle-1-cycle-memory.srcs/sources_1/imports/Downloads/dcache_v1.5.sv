@@ -78,7 +78,7 @@ module L1_cache_data (
     input clk,
     input cache_req_type data_req, //request info: index, write enable
     input cache_data_type data_write, //128 bit dataline
-    input [3:0] be,
+    input [1:0] be,
     input [1:0] block_offset,
     input from_ram,
     output cache_data_type data_read); //128 bit port that has data read
@@ -155,7 +155,7 @@ module dcache(
     cpu_result_type cpu_res;  //cache->CPU
     
     logic [1:0] block_offset;
-    logic [3:0] be;
+    logic [1:0] be;
     logic from_ram;
     logic wait_read, next_wait_read;   
     
@@ -183,11 +183,15 @@ module dcache(
 	//4-11 = index
 	//12-31 = tag
     //get the address
+    assign be = cpu_addr[1:0];
+    assign block_offset = cpu_addr[3:2];
     assign cpu_addr = (cpu.write_addr_valid) ? cpu.write_addr : cpu.read_addr;
     assign cpu_index = cpu_addr[11:4]; //Q: is this the right bits?
     assign cpu_tag = cpu_addr[31:12];
+    assign tag_req.index = cpu_index;
     //checks if the tag requested by the cpu address matches the tag in the tag cache and checks if it is valid
     assign hit = ((cpu_tag == tag_read.tag) && tag_read.valid);
+    //TODO: something wrong with the hit. seem the valid bit is the problem
 	
 	
 	//cache axi controller FSM
@@ -203,6 +207,12 @@ module dcache(
             mem.read_addr = {cpu_tag ,cpu_index}; //question: what is i? should this be {tag_read.tag, tag_req.index or data_req.index?}  A:
             
             tag_write.tag = cpu_tag; //this is input to tag cache. should dupdate on clock edge
+            tag_write.valid = 1;
+            tag_write.dirty = 0;
+            tag_req.we = 1;
+            data_req.index = cpu_index;
+            data_req.we = 1;
+            from_ram = 1;
             data_write = mem.read_data; //input to data cache, should write to memory on clock edge
             next_state = compare_tag;
           end
@@ -213,7 +223,7 @@ module dcache(
             //checks if there is a tag hit and read bit is valid
                 cpu.read_addr_ready = 1;
                 cpu.write_addr_ready = 1;
-
+                tag_req.we = 0;
                 
                 //successful write
                 if(cpu.write_addr_valid && hit)
@@ -305,6 +315,7 @@ module dcache(
 	   /*---------------------COMPARE TAG-----------------------------------------------------------*/
 	   if(state == compare_tag)
 	   begin 
+	        from_ram <= 0;
             cpu.read_data_valid <= 0;
             cpu.write_resp_valid <= 0;
 	   end
