@@ -78,7 +78,7 @@ module L1_cache_data (
     input clk,
     input cache_req_type data_req, //request info: index, write enable
     input cache_data_type data_write, //128 bit dataline
-    input [1:0] be,
+    input [3:0] be,
     input [1:0] block_offset,
     input from_ram,
     output cache_data_type data_read); //128 bit port that has data read
@@ -89,7 +89,7 @@ module L1_cache_data (
         for(int i=0; i<256; i++)
             data_mem[i]='0;
     end
-
+    
     always_ff @(posedge clk) begin
         if(data_req.we) begin //check if write enable for request is high
             if(from_ram) //check if data is coming from ram
@@ -105,6 +105,8 @@ module L1_cache_data (
             
         data_read <= data_mem[data_req.index]; //read back the data at specified index
     end
+    //TODO: fixes the data read problems but messes up other stuff
+    //assign data_read = data_mem[data_req.index]; //read back the data at specified index
 endmodule
 
 module L1_cache_tag (
@@ -155,7 +157,7 @@ module dcache(
     cpu_result_type cpu_res;  //cache->CPU
     
     logic [1:0] block_offset;
-    logic [1:0] be;
+    logic [3:0] be;
     logic from_ram;
     logic wait_read, next_wait_read;   
     
@@ -183,7 +185,7 @@ module dcache(
 	//4-11 = index
 	//12-31 = tag
     //get the address
-    assign be = cpu_addr[1:0];
+    assign be = cpu.strobe;
     assign block_offset = cpu_addr[3:2];
     assign cpu_addr = (cpu.write_addr_valid) ? cpu.write_addr : cpu.read_addr;
     assign cpu_index = cpu_addr[11:4]; //Q: is this the right bits?
@@ -191,33 +193,12 @@ module dcache(
     assign tag_req.index = cpu_index;
     //checks if the tag requested by the cpu address matches the tag in the tag cache and checks if it is valid
     assign hit = ((cpu_tag == tag_read.tag) && tag_read.valid);
-    //TODO: something wrong with the hit. seem the valid bit is the problem
 	
 	
 	//cache axi controller FSM
 	always_comb 
     begin 
         case(state)
-          save_in_cache: begin  
-            mem.read_addr_valid = 0;
-            mem.write_addr_valid = 0;
-            cpu.read_addr_ready = 0;
-            cpu.write_addr = 0;
-            cpu.read_data_valid = 0;
-            mem.read_addr = {cpu_tag ,cpu_index}; //question: what is i? should this be {tag_read.tag, tag_req.index or data_req.index?}  A:
-            
-            tag_write.tag = cpu_tag; //this is input to tag cache. should dupdate on clock edge
-            tag_write.valid = 1;
-            tag_write.dirty = 0;
-            tag_req.we = 1;
-            data_req.index = cpu_index;
-            data_req.we = 1;
-            from_ram = 1;
-            data_write = mem.read_data; //input to data cache, should write to memory on clock edge
-            next_state = compare_tag;
-          end
-
-
 
           compare_tag: begin
             //checks if there is a tag hit and read bit is valid
@@ -229,6 +210,9 @@ module dcache(
                 if(cpu.write_addr_valid && hit)
                 begin
                     data_req.index = cpu_index; //update index so the correct index is written to on the clock edge
+                    tag_req.index = cpu_index;
+                    tag_write.dirty = 1;
+                    data_write = cpu.write_data; 
                 end
                 
                 
@@ -236,24 +220,45 @@ module dcache(
                 if(cpu.read_addr_valid  && hit)
                 begin
                     data_req.index = cpu_index; //update index so the correct index is written to on the clock edge
+                    cpu.read_data = data_read[block_offset*32+:32];//read data from mem_cache at cpu index  
                 end
                 
                 
-                if((cpu.read_addr_valid || cpu.write_addr_valid) && !(hit) && !tag_read.dirty) //Question: tag hit? A:
+                if((cpu.read_addr_valid || cpu.write_addr_valid) && !(hit) && !tag_read.dirty) 
                 begin
                     next_state = allocate;
                 end
                 
 
                 if((cpu.read_addr_valid &&!(hit) && tag_read.dirty)
-                 || cpu.write_addr_valid && !(hit) && tag_write.dirty) //tag_read.tag? for hit. tag_read.dirty?
+                 || cpu.write_addr_valid && !(hit) && tag_write.dirty) 
                 begin
+                    mem.write_data = data_write;
                     next_state = writeback;
                 end   
           end
-          
+          save_in_cache: begin  
+            mem.read_addr_valid = 0;
+            mem.write_addr_valid = 0;
+            cpu.read_addr_ready = 0;
+            cpu.write_addr_ready = 0;  //double check
+            cpu.read_data_valid = 0;
+            mem.read_addr = {cpu_tag ,cpu_index}; //question: what is i? should this be {tag_read.tag, tag_req.index or data_req.index?}  A:
+            
+            tag_write.tag = cpu_tag; //this is input to tag cache. should dupdate on clock edge
+            tag_write.valid = 1;
+            tag_write.dirty = 0;
+            tag_req.we = 1;
+            data_req.index = cpu_index;
+            data_req.we = 1;
+            from_ram = 1;
+            data_write = mem.read_data; //input to data cache, should write to memory on clock edge
+            
+            next_state = compare_tag;
+          end
           allocate: begin
             //check if the memory is ready to be written
+          
             mem.write_addr_valid = 0;
             cpu.read_addr_ready = 0;
             cpu.write_addr_ready = 0;
@@ -263,7 +268,6 @@ module dcache(
             
             if(!mem.read_data_valid)
             begin
-                //Question: should this be in ff block? A: 
                 mem.read_addr_valid = 1;
                 next_state = allocate;
             end
@@ -290,6 +294,7 @@ module dcache(
             
             if(mem.write_addr_ready)
             begin
+                tag_write.dirty = 0;
                 next_state = allocate;
             end
             
@@ -302,43 +307,41 @@ module dcache(
 	always_ff @(posedge(clk))
 	begin
 	   
-	   /*---------------------Save IN CACHE-----------------------------------------------------------*/
-	   if((state == save_in_cache) && (next_state == compare_tag))
-	   begin
-
-             
-            tag_write.valid <= 1; //tag_read[tag_req.index].valid?
-            tag_write.dirty <= 0; //tag_read[tag_req.index].dirty?
-	   end
-	   
-	   
+	   //cpu.read_data_valid <= wait_read;
 	   /*---------------------COMPARE TAG-----------------------------------------------------------*/
 	   if(state == compare_tag)
 	   begin 
-	        from_ram <= 0;
-            cpu.read_data_valid <= 0;
-            cpu.write_resp_valid <= 0;
-	   end
-	   
-	   //-----------------------------------successful read----------------------------------------------------
-	   if(cpu.read_addr_valid  && hit) 
-        begin
+	        
+            //TODO: change the read data_valid timing that is why it is messed up
+             //-----------------------------------successful read----------------------------------------------------
+	       if(cpu.read_addr_valid  && hit) 
+            begin
             //data_req.index = cpu_req.index; //update index with the one requested from cpu
-            cpu.read_data <= data_read;//read data from mem_cache at cpu index    //data_read? data_read.data[] what in the box? index?
+            //cpu.read_data <= data_read;//read data from mem_cache at cpu index    //data_read? data_read.data[] what in the box? index?
             //cpu.read_data <= data_read.data[strobe]? Q
             cpu.read_data_valid <= 1;
             //next state <= compare_tag;
-        end
+            end
+            else
+            begin
+                from_ram <= 0;
+                cpu.read_data_valid <= 0;
+                cpu.write_resp_valid <= 0;
+            end
+            
+            
+            
+	   end
+	   
+	  
 	   
 	   //----------------------------------successful write------------------------------------------------------------
 	   if(cpu.write_addr_valid && hit)//look at diagram for the hit logic
         begin
-
-
-            data_write <= cpu.write_data; //what am I doing, it's 11:46pm and I'm tired
+            //data_write <= cpu.write_data; //what am I doing, it's 11:46pm and I'm tired
 
             //set the tag to dirty
-            tag_write.dirty <= 1;
+            //tag_write.dirty <= 1;
             cpu.write_resp_valid <= 1; //?
             //next state <= compare_tag;
         end
@@ -349,13 +352,13 @@ module dcache(
 	   if((state == compare_tag) && (next_state == writeback))
 	   begin
 	       //data_req.index <= mem_req.index;
-	       mem.write_data <= data_write; //Question: should this be mem_data, data_read, or data_write?
+	       //mem.write_data <= data_write; //Question: should this be mem_data, data_read, or data_write?
 	   end
 	   
 	   if((state == writeback) && (next_state == allocate))
 	   begin
 	   //Question: what am I setting to dirty? write, read, request?     
-            tag_write.dirty <= 0; //tag_req.dirty Q
+            //tag_write.dirty <= 0; //tag_req.dirty Q
        end
 	   
 	   
