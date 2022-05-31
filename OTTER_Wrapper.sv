@@ -33,7 +33,10 @@ module OTTER_Wrapper(
    output [7:0] VGA_RGB,
    output VGA_HS,
    output VGA_VS,
-   output Tx
+   output Tx,
+   output SPI_MOSI, //TODO: connect these in constraint file
+   output SPI_CS,  //TODO: connect these in constraint file
+   output SPI_SCK  //TODO: connect these in constraint file
    );
        
     //   logic sclk =0;
@@ -43,6 +46,8 @@ module OTTER_Wrapper(
     // to add constants here for the mux below
     localparam SWITCHES_AD = 32'h11000000;
     localparam VGA_READ_AD = 32'h11040000;
+    
+    //TODO: add MISO port address
            
     // OUTPUT PORT IDS ///////////////////////////////////////////////////////
     // In future labs you can add more MMIO
@@ -52,7 +57,14 @@ module OTTER_Wrapper(
     localparam VGA_COLOR_AD = 32'h11140000;
     localparam UART_DATA_AD = 32'h11180000;
     localparam UART_RDY_AD = 32'h111C0000;  
-    localparam KEYBOARD_AD = 32'h11200000;       
+    localparam KEYBOARD_AD = 32'h11200000;    
+    
+    //This will be written to in the C code
+    localparam SPI_MOSI_AD = 32'h110E0000; //TODO: change to the address needed   
+    //This will be written to in the C code
+    localparam SPI_CS_AD = 32'h11100000;    //TODO: change this to the address needed
+    
+    //TODO: add CS, SCLK, and MOSI addresses
     
    // Signals for connecting OTTER_MCU to OTTER_wrapper /////////////////////////
    logic s_interrupt, keyboard_int,btn_int;
@@ -85,6 +97,42 @@ module OTTER_Wrapper(
    
    // Declare Debouncer One Shot  ///////////////////////////////////////////
    debounce_one_shot DB(.CLK(sclk), .BTN(BTNL), .DB_BTN(btn_int));
+   
+   //Signals for the SPI
+   logic [7:0] SPI_Byte;
+   logic SPI_CS;
+   logic SPI_TX_RDY;
+   
+   //TODO: basically copied the sim file from github, how should I cite this?
+   SPI_Master_With_Single_CS 
+   #(.SPI_MODE(1'b0), //mode zero to match the DAC
+     .CLKS_PER_HALF_BIT(25), //TODO: Figure out the frequency of clock and how to get it down to 2MHz with these bits (100/(2*25)) = 2MHz assuming there clock is 100MHz
+     .MAX_BYTES_PER_CS(3'b100), //4 bytes per CS
+     .CS_INACTIVE_CLKS(5)) SPI //delay between bytes (in clk cycles), can probably just fiddle with this to find a good one 
+     (
+     
+   // Control/Data Signals,
+   .i_Rst_L(s_reset),     // FPGA Reset
+   .i_Clk(CLK),       // FPGA Clock
+   
+   // TX (MOSI) Signals
+   .i_TX_Count(3'b100),      // # bytes per CS low (4 bytes)
+   .i_TX_Byte(SPI_Byte),       // Byte to transmit on MOSI TODO: check that this is right
+   .i_TX_DV(1'b0),         // Data Valid Pulse with i_TX_Byte TODO: check that is is right
+   .o_TX_Ready(SPI_TX_RDY),      // Transmit Ready for next byte TODO: will need to have this trigger on clock edges?
+  
+   //don't need these
+   // RX (MISO) Signals
+   .o_RX_Count(),  // Index RX byte
+   .o_RX_DV(),     // Data Valid pulse (1 clock cycle)
+   .o_RX_Byte(),   // Byte received on MISO
+
+   // SPI Interface
+   .o_SPI_Clk(SPI_SCK),
+   .i_SPI_MISO(), //won't need this for DAC
+   .o_SPI_MOSI(SPI_MOSI), //TODO: make this an output
+   .o_SPI_CS_n(SPI_CS)
+   );
    
    
    //wire vgaCLK;
@@ -124,6 +172,10 @@ module OTTER_Wrapper(
                 LEDS_AD: LEDS <= IOBUS_out;    
                 SSEG_AD: r_SSEG <= IOBUS_out[15:0];
                 VGA_ADDR_AD: r_vga_wa <= IOBUS_out[16:0];  //[12:0];
+                
+                SPI_MOSI_AD: SPI_Byte <= IOBUS_out[7:0]; //TODO: check that these are right
+                SPI_CS_AD: SPI_CS <= IOBUS_out[0];
+                
                 VGA_COLOR_AD: begin  r_vga_wd <= IOBUS_out[7:0];
                                      r_vga_we <= 1;  
                               end     
@@ -139,13 +191,14 @@ module OTTER_Wrapper(
     always_comb
     begin
         IOBUS_in=32'b0;
-//        case(IOBUS_addr)
+        case(IOBUS_addr)
+              SPI_RDY_AD: IOBUS_in[0] = SPI_TX_RDY;
 //            SWITCHES_AD: IOBUS_in[15:0] = SWITCHES;
 //            VGA_READ_AD: IOBUS_in[15:0] = r_vga_rd;
 //            UART_RDY_AD: IOBUS_in[0] = uart_ready;
 //            KEYBOARD_AD: IOBUS_in[7:0] = s_scancode;
 //            default: IOBUS_in=32'b0;
-//        endcase
+        endcase
     end
    endmodule
 
