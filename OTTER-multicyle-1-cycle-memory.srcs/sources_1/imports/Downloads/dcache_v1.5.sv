@@ -76,24 +76,24 @@ import memory_bus_sizes::*;
 
 module L1_cache_data ( 
     input clk,
-    input cache_req_type data_req, //request info: index, write enable
-    input cache_data_type data_write, //128 bit dataline
+    input cache_req_type data_req,
+    input cache_data_type data_write,
     input [3:0] be,
     input [1:0] block_offset,
     input from_ram,
-    output cache_data_type data_read); //128 bit port that has data read
+    output cache_data_type data_read);
     
-    cache_data_type data_mem[0:255]; //set up memory
+    cache_data_type data_mem[0:255];
     
-    initial begin //initalize memory to 0
+    initial begin
         for(int i=0; i<256; i++)
             data_mem[i]='0;
     end
-    
+
     always_ff @(posedge clk) begin
-        if(data_req.we) begin //check if write enable for request is high
-            if(from_ram) //check if data is coming from ram
-                data_mem[data_req.index] <= data_write; //write data to specified index
+        if(data_req.we) begin
+            if(from_ram) 
+                data_mem[data_req.index] <= data_write;
             if(!from_ram) begin
               for (int b = 0; b < WORD_SIZE; b++) begin
                 if (be[b]) begin
@@ -103,19 +103,17 @@ module L1_cache_data (
             end
         end
             
-        data_read <= data_mem[data_req.index]; //read back the data at specified index
+        data_read <= data_mem[data_req.index];
     end
-    //TODO: fixes the data read problems but messes up other stuff
-    //assign data_read = data_mem[data_req.index]; //read back the data at specified index
 endmodule
 
 module L1_cache_tag (
     input logic clk,
-    input cache_req_type tag_req, //tag request, index/write enable
-    input cache_tag_type tag_write, //write port:valid,dirty,tag
-    output cache_tag_type tag_read); //read port:valid,dirty,tag
+    input cache_req_type tag_req,
+    input cache_tag_type tag_write,
+    output cache_tag_type tag_read);
     
-	// tag storage 
+		// tag storage 
 	cache_tag_type tag_storage[0:255];
 	
 	//initialize storage to zeros
@@ -176,207 +174,194 @@ module dcache(
     
     cpu_result_type next_cpu_res;
     
+    
     logic [31:0] cpu_addr;
     logic [7:0] cpu_index;
     logic [19:0] cpu_tag;
-    
-	//0-1 = byte offset
-	//2-3 = block offset
-	//4-11 = index
-	//12-31 = tag
-    //get the address
+    //Got idea to use intermediate signals from classmates Patrick and Nolan
+    logic [31:0] read_data_hold;
+    logic data_req_we_hold;
+    logic write_resp_valid_hold;
+    logic read_data_valid_hold;
+
+    assign cpu_addr = (cpu.write_addr_valid) ? cpu.write_addr : cpu.read_addr;
     assign be = cpu.strobe;
     assign block_offset = cpu_addr[3:2];
-    assign cpu_addr = (cpu.write_addr_valid) ? cpu.write_addr : cpu.read_addr;
-    assign cpu_index = cpu_addr[11:4]; //Q: is this the right bits?
-    assign cpu_tag = cpu_addr[31:12];
-    assign tag_req.index = cpu_index;
-    //checks if the tag requested by the cpu address matches the tag in the tag cache and checks if it is valid
+    assign cpu_index = cpu_addr[11:4];
+    assign cpu_tag = cpu_addr[TAG_MSB:TAG_LSB];
+    assign tag_req.index  = cpu_addr[11:4];
+    assign data_req.index = cpu_addr[11:4];
     assign hit = ((cpu_tag == tag_read.tag) && tag_read.valid);
+    
+    //suggestion from student Dino
+	assign mem.write_data = data_read;
 	
-	
-	//cache axi controller FSM
+	//FSM for Cache Controller
 	always_comb 
-    begin 
+	begin
         case(state)
-
-          compare_tag: begin
-            //checks if there is a tag hit and read bit is valid
+        
+            compare_tag: begin
+                tag_req.we = 1;
+                data_req_we_hold = 0;
                 cpu.read_addr_ready = 1;
                 cpu.write_addr_ready = 1;
-                tag_req.we = 0;
+                read_data_valid_hold = 0;
+                write_resp_valid_hold = 0;
                 
                 //successful write
                 if(cpu.write_addr_valid && hit)
                 begin
-                    data_req.index = cpu_index; //update index so the correct index is written to on the clock edge
-                    tag_req.index = cpu_index;
+                    //store the data on the clock edge (32 bits for the data)
+                    data_write[block_offset*32+:32] = cpu.write_data;
+                    //just a bit to acknowldege the write and set the write address valid bit low
+                    write_resp_valid_hold = 1;
+                    //enable writing to tag/data cache
+                    tag_req.we = 1;
+                    data_req_we_hold = 1;
+                    //make this entry dirty so it can be written back later
                     tag_write.dirty = 1;
-                    data_write = cpu.write_data; 
+                    //indicate that the data is from the cache
+                    from_ram = 0;
+                    write_resp_valid_hold = 1;
+                    next_state = compare_tag;
                 end
                 
-                
-                //successful read
-                if(cpu.read_addr_valid  && hit)
+                //seuccessful read
+                if(cpu.read_addr_valid && hit)
                 begin
-                    data_req.index = cpu_index; //update index so the correct index is written to on the clock edge
-                    cpu.read_data = data_read[block_offset*32+:32];//read data from mem_cache at cpu index  
+                    //disable writing because we are reading
+                    tag_req.we = 0;
+                    data_req_we_hold = 0;
+                    //read the data from the cache into the cpu (32 bits)
+                    read_data_hold = data_read[block_offset*32+:32];
+                    //set the read data valid bit high
+                    read_data_valid_hold = 1;
+                    
+                    next_state = compare_tag;
                 end
                 
+                //checks if the read/write address is valid in the cache and if there is not a hit and the data is dirty
+                //this means that the data there needs to be updated in the memory
+                if((cpu.read_addr_valid || cpu.write_addr_valid ) && !hit && tag_read.dirty)
+                begin
+                    //want to keep the tag the same since we are writing to the same tag in memory
+                    tag_req.we = 0;
+                    //write the dirty cache data to memory since it will be overwritten
+                    mem.write_data = data_read[block_offset*32+:32];
+                    
+                    next_state = writeback;
+                end
                 
-                if((cpu.read_addr_valid || cpu.write_addr_valid) && !(hit) && !tag_read.dirty) 
+                //checks if the read/write is valid and it is not in the cache and the data isn't dirty
+                //it means that the data was not in the cache and needs to be retrieved from main memory
+                if((cpu.read_addr_valid || cpu.write_addr_valid) && !hit && !tag_read.dirty)
                 begin
                     next_state = allocate;
                 end
                 
-
-                if((cpu.read_addr_valid &&!(hit) && tag_read.dirty)
-                 || cpu.write_addr_valid && !(hit) && tag_write.dirty) 
+            end
+            
+            allocate: begin
+                //keeps tag the same and allows to system to keep reading from memory
+                tag_req.we = 0;
+                data_req_we_hold = 1;
+                mem.write_addr_valid = 0;
+                cpu.read_addr_ready = 0;
+                cpu.write_addr_ready = 0;
+                cpu.read_data_valid = 0;
+                //put the address for the memory to read from
+                mem.read_addr = {cpu_tag, cpu_index};
+                
+                //will keep polling the memory until it gets the data requested
+                if(!mem.read_data_valid)
                 begin
-                    mem.write_data = data_write;
-                    next_state = writeback;
-                end   
-          end
-          save_in_cache: begin  
-            mem.read_addr_valid = 0;
-            mem.write_addr_valid = 0;
-            cpu.read_addr_ready = 0;
-            cpu.write_addr_ready = 0;  //double check
-            cpu.read_data_valid = 0;
-            mem.read_addr = {cpu_tag ,cpu_index}; //question: what is i? should this be {tag_read.tag, tag_req.index or data_req.index?}  A:
-            
-            tag_write.tag = cpu_tag; //this is input to tag cache. should dupdate on clock edge
-            tag_write.valid = 1;
-            tag_write.dirty = 0;
-            tag_req.we = 1;
-            data_req.index = cpu_index;
-            data_req.we = 1;
-            from_ram = 1;
-            data_write = mem.read_data; //input to data cache, should write to memory on clock edge
-            
-            next_state = compare_tag;
-          end
-          allocate: begin
-            //check if the memory is ready to be written
-          
-            mem.write_addr_valid = 0;
-            cpu.read_addr_ready = 0;
-            cpu.write_addr_ready = 0;
-            cpu.read_data_valid = 0;
-            mem.read_addr = {cpu_tag ,cpu_index}; 
-
-            
-            if(!mem.read_data_valid)
-            begin
-                mem.read_addr_valid = 1;
-                next_state = allocate;
+                    mem.read_addr_valid = 1;
+                    
+                    next_state = allocate;
+                end
+               
+               //once the data has been allocated it stops it from polling and move to save in cache
+               if(mem.read_data_valid)
+               begin
+                    mem.read_addr_valid = 0;
+                    
+                    next_state = save_in_cache;
+               end
+               
             end
             
-            if(mem.read_data_valid)
-            begin 
+            save_in_cache: begin
+                //makes sure that no reading or writing is happening while saving in the cache
                 mem.read_addr_valid = 0;
-                next_state = save_in_cache;
-            end
-          end
-
-          writeback: begin
-            mem.read_addr_valid = 0;
-            mem.write_addr_valid = 1;
-            cpu.read_addr_ready = 0;
-            cpu.write_addr_ready = 0;
-            cpu.read_data_valid = 0;
-            mem.write_addr  = {tag_write.tag, cpu_index}; 
- 
-            if(!mem.write_addr_ready)
-            begin
-                next_state = writeback;
-            end
-            
-            if(mem.write_addr_ready)
-            begin
+                mem.write_addr_valid = 0;
+                cpu.read_addr_ready = 0;
+                cpu.write_addr_ready  = 0;
+                cpu.read_data_valid = 0;
+                mem.read_addr = {cpu_tag, cpu_index};
+                
+                //write data from ram to cache
+                from_ram = 1;
+                data_req_we_hold = 0;
+                tag_req.we = 1;
+                //get a full cache line (128 bits) and put it into cache
+                data_write = mem.read_data;
+                //write tag data from memory to cache
+                tag_write.tag = cpu_tag;
+                //read from memory so cache entry is valid and clean
+                tag_write.valid = 1;
                 tag_write.dirty = 0;
-                next_state = allocate;
+                
+                next_state = compare_tag;
             end
             
-          end
-        endcase     
-    end
+            //will write the cache data to memory
+            writeback: begin
+                //make sure only a mem write will happen
+                tag_req.we = 0;
+                mem.read_addr_valid = 0;
+                mem.write_addr_valid = 1;
+                cpu.read_addr_ready = 0;
+                cpu.write_addr_ready = 0;
+                cpu.read_data_valid = 0;
+                //write to the address we want to write to in the cache
+                mem.write_addr = {tag_read.tag, tag_req.index};
+                
+                //will keep polling until the memory address is ready to be written to
+                if(!mem.write_addr_ready)
+                begin
+                    next_state = writeback;
+                end
+                
+                //the memory data was updated so it is no longer dirty (old data)
+                if(mem.write_addr_ready)
+                begin
+                    tag_write.dirty = 0;
+                    
+                    next_state = allocate;
+                end
+            end
+        endcase
+	end
 	
-	
-	//ff block to change states and update values
-	always_ff @(posedge(clk))
+	always_ff @(posedge clk)
 	begin
-	   
-	   //cpu.read_data_valid <= wait_read;
-	   /*---------------------COMPARE TAG-----------------------------------------------------------*/
-	   if(state == compare_tag)
-	   begin 
-	        
-            //TODO: change the read data_valid timing that is why it is messed up
-             //-----------------------------------successful read----------------------------------------------------
-	       if(cpu.read_addr_valid  && hit) 
-            begin
-            //data_req.index = cpu_req.index; //update index with the one requested from cpu
-            //cpu.read_data <= data_read;//read data from mem_cache at cpu index    //data_read? data_read.data[] what in the box? index?
-            //cpu.read_data <= data_read.data[strobe]? Q
-            cpu.read_data_valid <= 1;
-            //next state <= compare_tag;
-            end
-            else
-            begin
-                from_ram <= 0;
-                cpu.read_data_valid <= 0;
-                cpu.write_resp_valid <= 0;
-            end
-            
-            
-            
-	   end
-	   
-	  
-	   
-	   //----------------------------------successful write------------------------------------------------------------
-	   if(cpu.write_addr_valid && hit)//look at diagram for the hit logic
-        begin
-            //data_write <= cpu.write_data; //what am I doing, it's 11:46pm and I'm tired
-
-            //set the tag to dirty
-            //tag_write.dirty <= 1;
-            cpu.write_resp_valid <= 1; //?
-            //next state <= compare_tag;
-        end
-	   /*-----------------------------------------------------------------------------------------------------*/
-	   
-	   //-------------------------------------------WRITEBACK-----------------------------------------------------
-	   //compare tag to writeback transition
-	   if((state == compare_tag) && (next_state == writeback))
-	   begin
-	       //data_req.index <= mem_req.index;
-	       //mem.write_data <= data_write; //Question: should this be mem_data, data_read, or data_write?
-	   end
-	   
-	   if((state == writeback) && (next_state == allocate))
-	   begin
-	   //Question: what am I setting to dirty? write, read, request?     
-            //tag_write.dirty <= 0; //tag_req.dirty Q
-       end
-	   
-	   
-	   
-	   //------------------------------------------------------------------------------------------------------------
-	   
-	   /*-------------------UPDATE STATES---------------------------------------------------------------------*/
 	   if(RESET)
 	   begin
 	       state <= compare_tag;
 	   end
+	   //write intermidiate values to the corresponds values on the clock edge
 	   else
+	       //avoid multi driven errors and update valid bit for comparetag with the right timing
+	       if(state == compare_tag)
+	           cpu.read_data_valid <= read_data_valid_hold;
+	       //update data and control signals with correct timing
+	       cpu.read_data <= read_data_hold;
+	       data_req.we <= data_req_we_hold;
+	       cpu.write_resp_valid <= write_resp_valid_hold;
 	       state <= next_state;
 	end
-	
-	
-	
-
+    
     L1_cache_tag L1_tags(.*);
     L1_cache_data L1_data(.*);
 
